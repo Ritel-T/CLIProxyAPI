@@ -41,6 +41,13 @@ func decodeSignature(signature string) string {
 	return signature
 }
 
+func displayClaudeInputTokens(count int64) int64 {
+	if count <= 0 {
+		return 1
+	}
+	return count
+}
+
 func formatClaudeSignatureValue(modelName, signature string) string {
 	if cache.SignatureCacheEnabled() {
 		return fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), signature)
@@ -137,7 +144,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 		// Use cpaUsageMetadata within the message_start event for Claude.
 		if promptTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.promptTokenCount"); promptTokenCount.Exists() {
-			inputTokens := promptTokenCount.Int()
+			inputTokens := displayClaudeInputTokens(promptTokenCount.Int())
 			if split, applied := cache.ApplySimulatedCacheOverride(override, promptTokenCount.Int()); applied {
 				inputTokens = split.DisplayInputTokens()
 			}
@@ -371,7 +378,7 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 		}
 	}
 
-	delta := []byte(fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"%s","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`, stopReason, params.PromptTokenCount, usageOutputTokens))
+	delta := []byte(fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"%s","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`, stopReason, displayClaudeInputTokens(params.PromptTokenCount), usageOutputTokens))
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
 	if params.CachedTokenCount > 0 {
 		var err error
@@ -443,7 +450,7 @@ func ConvertAntigravityResponseToClaudeNonStream(ctx context.Context, _ string, 
 	if inputTokens < 0 {
 		inputTokens = 0
 	}
-	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", inputTokens)
+	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", displayClaudeInputTokens(inputTokens))
 	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.output_tokens", outputTokens)
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
 	if cachedTokens > 0 {

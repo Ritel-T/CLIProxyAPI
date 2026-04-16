@@ -538,3 +538,41 @@ func TestConvertAntigravityResponseToClaude_MessageStartRespectsSimulatedCacheSp
 		t.Fatalf("final usage missing cache_creation_input_tokens: %s", joined)
 	}
 }
+
+func TestConvertAntigravityResponseToClaude_MessageStartClampsZeroInputToOne(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+	}`)
+	chunk := []byte(`{
+		"response": {
+			"responseId": "resp_1",
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"cpaUsageMetadata": {
+				"promptTokenCount": 0,
+				"candidatesTokenCount": 40
+			},
+			"usageMetadata": {
+				"promptTokenCount": 0,
+				"candidatesTokenCount": 40,
+				"totalTokenCount": 40,
+				"cachedContentTokenCount": 0
+			},
+			"candidates": [{
+				"finishReason": "STOP",
+				"content": {"parts": [{"text": "hello"}]}
+			}]
+		}
+	}`)
+
+	var param any
+	parts := ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk, &param)
+	joined := string(bytes.Join(parts, nil))
+
+	if !strings.Contains(joined, `"usage": {"input_tokens": 1, "output_tokens": 40}`) {
+		t.Fatalf("message_start usage should clamp zero input_tokens to 1: %s", joined)
+	}
+	if !strings.Contains(joined, `"usage":{"input_tokens":1,"output_tokens":40}`) {
+		t.Fatalf("message_delta usage should clamp zero input_tokens to 1: %s", joined)
+	}
+}
