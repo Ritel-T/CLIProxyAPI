@@ -96,6 +96,10 @@ type Config struct {
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
+	// SimulatedCache controls Antigravity Claude-compatible usage simulation.
+	// It rewrites cache-related usage fields for billing compatibility only.
+	SimulatedCache SimulatedCacheConfig `yaml:"simulated-cache" json:"simulated-cache"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 
@@ -232,6 +236,15 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+}
+
+// SimulatedCacheConfig controls Antigravity Claude-compatible prompt cache billing simulation.
+// This feature does not cache or replay responses; it only rewrites usage fields.
+type SimulatedCacheConfig struct {
+	Enabled         bool    `yaml:"enabled" json:"enabled"`
+	MissProbability float64 `yaml:"miss_probability" json:"miss_probability"`
+	TTLSeconds      int     `yaml:"ttl_seconds" json:"ttl_seconds"`
+	RetentionRatio  float64 `yaml:"retention_ratio" json:"retention_ratio"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -608,6 +621,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.SimulatedCache.Enabled = true
+	cfg.SimulatedCache.MissProbability = 0
+	cfg.SimulatedCache.TTLSeconds = 300
+	cfg.SimulatedCache.RetentionRatio = 0.7
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -698,6 +715,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Sanitize simulated cache billing settings.
+	cfg.SanitizeSimulatedCache()
+
 	// NOTE: Legacy migration persistence is intentionally disabled together with
 	// startup legacy migration to keep startup read-only for config.yaml.
 	// Re-enable the block below if automatic startup migration is needed again.
@@ -715,6 +735,28 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeSimulatedCache normalizes simulated cache billing settings to safe bounds.
+func (cfg *Config) SanitizeSimulatedCache() {
+	if cfg == nil {
+		return
+	}
+	if cfg.SimulatedCache.MissProbability < 0 {
+		cfg.SimulatedCache.MissProbability = 0
+	}
+	if cfg.SimulatedCache.MissProbability > 1 {
+		cfg.SimulatedCache.MissProbability = 1
+	}
+	if cfg.SimulatedCache.TTLSeconds < 0 {
+		cfg.SimulatedCache.TTLSeconds = 0
+	}
+	if cfg.SimulatedCache.RetentionRatio < 0 {
+		cfg.SimulatedCache.RetentionRatio = 0
+	}
+	if cfg.SimulatedCache.RetentionRatio > 1 {
+		cfg.SimulatedCache.RetentionRatio = 1
+	}
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

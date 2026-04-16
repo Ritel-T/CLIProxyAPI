@@ -257,6 +257,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
+	applySimulatedCacheConfig(nil, cfg)
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
@@ -920,6 +921,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	applySignatureCacheConfig(oldCfg, cfg)
+	applySimulatedCacheConfig(oldCfg, cfg)
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
@@ -1084,6 +1086,20 @@ func applySignatureCacheConfig(oldCfg, cfg *config.Config) {
 	oldStrict := configuredSignatureBypassStrict(oldCfg)
 	if oldStrict != newStrict {
 		cache.SetSignatureBypassStrictMode(newStrict)
+	}
+}
+
+func applySimulatedCacheConfig(oldCfg, cfg *config.Config) {
+	newCfg := config.SimulatedCacheConfig{}
+	if cfg != nil {
+		newCfg = cfg.SimulatedCache
+	}
+	if oldCfg == nil {
+		cache.SetSimulatedCacheConfig(newCfg)
+		return
+	}
+	if oldCfg.SimulatedCache != newCfg {
+		cache.SetSimulatedCacheConfig(newCfg)
 	}
 }
 

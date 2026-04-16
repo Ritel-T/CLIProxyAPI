@@ -72,6 +72,18 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.NonStreamKeepAliveInterval != newCfg.NonStreamKeepAliveInterval {
 		changes = append(changes, fmt.Sprintf("nonstream-keepalive-interval: %d -> %d", oldCfg.NonStreamKeepAliveInterval, newCfg.NonStreamKeepAliveInterval))
 	}
+	if oldCfg.SimulatedCache.Enabled != newCfg.SimulatedCache.Enabled {
+		changes = append(changes, fmt.Sprintf("simulated-cache.enabled: %t -> %t", oldCfg.SimulatedCache.Enabled, newCfg.SimulatedCache.Enabled))
+	}
+	if oldCfg.SimulatedCache.MissProbability != newCfg.SimulatedCache.MissProbability {
+		changes = append(changes, fmt.Sprintf("simulated-cache.miss_probability: %g -> %g", oldCfg.SimulatedCache.MissProbability, newCfg.SimulatedCache.MissProbability))
+	}
+	if oldCfg.SimulatedCache.TTLSeconds != newCfg.SimulatedCache.TTLSeconds {
+		changes = append(changes, fmt.Sprintf("simulated-cache.ttl_seconds: %d -> %d", oldCfg.SimulatedCache.TTLSeconds, newCfg.SimulatedCache.TTLSeconds))
+	}
+	if oldCfg.SimulatedCache.RetentionRatio != newCfg.SimulatedCache.RetentionRatio {
+		changes = append(changes, fmt.Sprintf("simulated-cache.retention_ratio: %g -> %g", oldCfg.SimulatedCache.RetentionRatio, newCfg.SimulatedCache.RetentionRatio))
+	}
 
 	// Quota-exceeded behavior
 	if oldCfg.QuotaExceeded.SwitchProject != newCfg.QuotaExceeded.SwitchProject {

@@ -135,6 +135,16 @@ nonstream-keepalive-interval: 0
 # When false (default), only checks R/E prefix + base64 + first byte 0x12.
 # antigravity-signature-bypass-strict: false
 
+# Simulated cache billing for Antigravity Claude-compatible responses.
+# This does NOT cache or replay responses. It only rewrites Claude usage fields
+# such as cache_read_input_tokens / cache_creation_input_tokens / input_tokens
+# to simulate prompt cache hit/miss behavior across turns.
+simulated-cache:
+  enabled: true
+  miss_probability: 0
+  ttl_seconds: 300
+  retention_ratio: 0.7
+
 # Gemini API keys
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
