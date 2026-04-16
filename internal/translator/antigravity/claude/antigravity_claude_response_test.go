@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/tidwall/gjson"
 )
 
 // ============================================================================
@@ -345,5 +346,195 @@ func TestConvertAntigravityResponseToClaude_SignatureOnlyChunk(t *testing.T) {
 	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", "Full thinking text.")
 	if cachedSig != validSignature {
 		t.Errorf("Signature-only chunk should still cache correctly, got %q", cachedSig)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_SimulatedCacheFirstTurn(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+	}`)
+	responseJSON := []byte(`{
+		"response": {
+			"responseId": "resp_1",
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"usageMetadata": {
+				"promptTokenCount": 120,
+				"candidatesTokenCount": 40,
+				"totalTokenCount": 160,
+				"cachedContentTokenCount": 10
+			},
+			"candidates": [{
+				"finishReason": "STOP",
+				"content": {"parts": [{"text": "hello"}]}
+			}]
+		}
+	}`)
+
+	ctx := cache.WithSimulatedCacheOverride(context.Background(), &cache.SimulatedCacheOverride{IsFirstTurn: true})
+	converted := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, nil)
+
+	if got := gjson.GetBytes(converted, "usage.input_tokens").Int(); got != 1 {
+		t.Fatalf("usage.input_tokens = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(converted, "usage.cache_read_input_tokens").Int(); got != 0 {
+		t.Fatalf("usage.cache_read_input_tokens = %d, want 0", got)
+	}
+	if got := gjson.GetBytes(converted, "usage.cache_creation_input_tokens").Int(); got != 120 {
+		t.Fatalf("usage.cache_creation_input_tokens = %d, want 120", got)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_SimulatedCacheHit(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+	}`)
+	responseJSON := []byte(`{
+		"response": {
+			"responseId": "resp_1",
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"usageMetadata": {
+				"promptTokenCount": 120,
+				"candidatesTokenCount": 40,
+				"totalTokenCount": 160,
+				"cachedContentTokenCount": 5
+			},
+			"candidates": [{
+				"finishReason": "STOP",
+				"content": {"parts": [{"text": "hello"}]}
+			}]
+		}
+	}`)
+
+	ctx := cache.WithSimulatedCacheOverride(context.Background(), &cache.SimulatedCacheOverride{HistoryCachedTokenCount: 70})
+	converted := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, nil)
+
+	if got := gjson.GetBytes(converted, "usage.input_tokens").Int(); got != 1 {
+		t.Fatalf("usage.input_tokens = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(converted, "usage.cache_read_input_tokens").Int(); got != 70 {
+		t.Fatalf("usage.cache_read_input_tokens = %d, want 70", got)
+	}
+	if got := gjson.GetBytes(converted, "usage.cache_creation_input_tokens").Int(); got != 50 {
+		t.Fatalf("usage.cache_creation_input_tokens = %d, want 50", got)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_StreamSimulatedCacheUsage(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+	}`)
+	chunk := []byte(`{
+		"response": {
+			"responseId": "resp_1",
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"usageMetadata": {
+				"promptTokenCount": 120,
+				"candidatesTokenCount": 40,
+				"totalTokenCount": 160,
+				"cachedContentTokenCount": 5
+			},
+			"candidates": [{
+				"finishReason": "STOP",
+				"content": {"parts": [{"text": "hello"}]}
+			}]
+		}
+	}`)
+
+	var param any
+	ctx := cache.WithSimulatedCacheOverride(context.Background(), &cache.SimulatedCacheOverride{HistoryCachedTokenCount: 70})
+	parts := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk, &param)
+	joined := string(bytes.Join(parts, nil))
+
+	if !strings.Contains(joined, `"cache_read_input_tokens":70`) {
+		t.Fatalf("stream output missing cache_read_input_tokens override: %s", joined)
+	}
+	if !strings.Contains(joined, `"input_tokens":1`) {
+		t.Fatalf("stream output missing input_tokens override: %s", joined)
+	}
+	if !strings.Contains(joined, `"cache_creation_input_tokens":50`) {
+		t.Fatalf("stream output missing cache_creation_input_tokens override: %s", joined)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_StreamSimulatedCacheFullCoverageKeepsInputZero(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+	}`)
+	chunk := []byte(`{
+		"response": {
+			"responseId": "resp_1",
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"usageMetadata": {
+				"promptTokenCount": 120,
+				"candidatesTokenCount": 40,
+				"totalTokenCount": 160,
+				"cachedContentTokenCount": 0
+			},
+			"candidates": [{
+				"finishReason": "STOP",
+				"content": {"parts": [{"text": "hello"}]}
+			}]
+		}
+	}`)
+
+	var param any
+	ctx := cache.WithSimulatedCacheOverride(context.Background(), &cache.SimulatedCacheOverride{HistoryCachedTokenCount: 120})
+	parts := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk, &param)
+	joined := string(bytes.Join(parts, nil))
+
+	if !strings.Contains(joined, `"cache_read_input_tokens":120`) {
+		t.Fatalf("stream output missing full cache read override: %s", joined)
+	}
+	if strings.Contains(joined, `"cache_creation_input_tokens":120`) {
+		t.Fatalf("stream output incorrectly reports full prompt as cache creation: %s", joined)
+	}
+	if !strings.Contains(joined, `"input_tokens":1`) {
+		t.Fatalf("stream output should keep input_tokens at 1 when cache covers full prompt: %s", joined)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_MessageStartRespectsSimulatedCacheSplit(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+	}`)
+	chunk := []byte(`{
+		"response": {
+			"responseId": "resp_1",
+			"modelVersion": "claude-sonnet-4-5-thinking",
+			"cpaUsageMetadata": {
+				"promptTokenCount": 120,
+				"candidatesTokenCount": 40
+			},
+			"usageMetadata": {
+				"promptTokenCount": 120,
+				"candidatesTokenCount": 40,
+				"totalTokenCount": 160,
+				"cachedContentTokenCount": 0
+			},
+			"candidates": [{
+				"finishReason": "STOP",
+				"content": {"parts": [{"text": "hello"}]}
+			}]
+		}
+	}`)
+
+	var param any
+	ctx := cache.WithSimulatedCacheOverride(context.Background(), &cache.SimulatedCacheOverride{IsFirstTurn: true})
+	parts := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk, &param)
+	joined := string(bytes.Join(parts, nil))
+
+	if !strings.Contains(joined, `"type": "message_start"`) {
+		t.Fatalf("stream output missing message_start: %s", joined)
+	}
+	if !strings.Contains(joined, `"usage": {"input_tokens": 1, "output_tokens": 40}`) {
+		t.Fatalf("message_start usage should reflect split input_tokens=1: %s", joined)
+	}
+	if !strings.Contains(joined, `"cache_creation_input_tokens":120`) {
+		t.Fatalf("final usage missing cache_creation_input_tokens: %s", joined)
 	}
 }

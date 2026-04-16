@@ -208,6 +208,71 @@ func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []b
 // Identifier returns the executor identifier.
 func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 
+func withAntigravitySimulatedCacheOverride(ctx context.Context, override *cache.SimulatedCacheOverride) context.Context {
+	return cache.WithSimulatedCacheOverride(ctx, override)
+}
+
+func antigravitySimulatedCacheKey(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	return cache.GenerateSimulatedCacheKey(ctx, auth, req, opts)
+}
+
+func applyAntigravitySimulatedCacheContext(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (context.Context, string) {
+	cacheKey := antigravitySimulatedCacheKey(ctx, auth, req, opts)
+	override := cache.ComputeSimulatedCacheOverride(cacheKey)
+	if override == nil {
+		return ctx, cacheKey
+	}
+	return withAntigravitySimulatedCacheOverride(ctx, override), cacheKey
+}
+
+func updateAntigravitySimulatedCacheState(cacheKey string, antigravityPayload []byte) {
+	if strings.TrimSpace(cacheKey) == "" || len(antigravityPayload) == 0 {
+		return
+	}
+	promptTokens := gjson.GetBytes(antigravityPayload, "response.usageMetadata.promptTokenCount").Int()
+	if promptTokens == 0 {
+		promptTokens = gjson.GetBytes(antigravityPayload, "usageMetadata.promptTokenCount").Int()
+	}
+	cache.UpdateSimulatedCacheState(cacheKey, promptTokens)
+}
+
+func rewriteAntigravityStreamUsageForSimulatedCache(line []byte, override *cache.SimulatedCacheOverride) []byte {
+	if override == nil {
+		return line
+	}
+	payload := helps.JSONPayload(line)
+	if payload == nil {
+		return line
+	}
+	finishReason := gjson.GetBytes(payload, "response.candidates.0.finishReason")
+	if finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+		return line
+	}
+	promptTokenCount := gjson.GetBytes(payload, "response.usageMetadata.promptTokenCount")
+	if !promptTokenCount.Exists() {
+		return line
+	}
+	split, applied := cache.ApplySimulatedCacheOverride(override, promptTokenCount.Int())
+	if !applied {
+		return line
+	}
+	rewritten, err := sjson.SetBytes(payload, "response.usageMetadata.promptTokenCount", split.DisplayInputTokens())
+	if err != nil {
+		return line
+	}
+	if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
+		prefixIdx := bytes.Index(line, []byte("data:"))
+		if prefixIdx >= 0 {
+			var rebuilt []byte
+			rebuilt = append(rebuilt, line[:prefixIdx]...)
+			rebuilt = append(rebuilt, []byte("data: ")...)
+			rebuilt = append(rebuilt, rewritten...)
+			return rebuilt
+		}
+	}
+	return rewritten
+}
+
 // PrepareRequest injects Antigravity credentials into the outgoing HTTP request.
 func (e *AntigravityExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
@@ -689,6 +754,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	ctx, simulatedCacheKey := applyAntigravitySimulatedCacheContext(ctx, auth, req, opts)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
@@ -817,6 +883,7 @@ attemptLoop:
 							reporter.Publish(ctx, helps.ParseAntigravityUsage(creditsBody))
 							var param any
 							converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, creditsBody, &param)
+							updateAntigravitySimulatedCacheState(simulatedCacheKey, creditsBody)
 							resp = cliproxyexecutor.Response{Payload: converted, Headers: creditsResp.Header.Clone()}
 							reporter.EnsurePublished(ctx)
 							return resp, nil
@@ -873,6 +940,7 @@ attemptLoop:
 			reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
+			updateAntigravitySimulatedCacheState(simulatedCacheKey, bodyBytes)
 			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
 			reporter.EnsurePublished(ctx)
 			return resp, nil
@@ -903,6 +971,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	ctx, simulatedCacheKey := applyAntigravitySimulatedCacheContext(ctx, auth, req, opts)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
@@ -1135,6 +1204,7 @@ attemptLoop:
 				}
 			}
 			resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
+			updateAntigravitySimulatedCacheState(simulatedCacheKey, resp.Payload)
 
 			reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
 			var param any
@@ -1368,6 +1438,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	ctx, simulatedCacheKey := applyAntigravitySimulatedCacheContext(ctx, auth, req, opts)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
@@ -1551,7 +1622,7 @@ attemptLoop:
 
 		streamSuccessExecuteStream:
 			out := make(chan cliproxyexecutor.StreamChunk)
-			go func(resp *http.Response) {
+			go func(resp *http.Response, cacheKey string) {
 				defer close(out)
 				defer func() {
 					if errClose := resp.Body.Close(); errClose != nil {
@@ -1561,9 +1632,12 @@ attemptLoop:
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
 				var param any
+				var lastUsagePayload []byte
+				override := cache.SimulatedCacheOverrideFromContext(ctx)
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+					line = rewriteAntigravityStreamUsageForSimulatedCache(bytes.Clone(line), override)
 
 					// Filter usage metadata for all models
 					// Only retain usage statistics in the terminal chunk
@@ -1576,6 +1650,7 @@ attemptLoop:
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
 						reporter.Publish(ctx, detail)
+						lastUsagePayload = bytes.Clone(payload)
 					}
 
 					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
@@ -1592,9 +1667,10 @@ attemptLoop:
 					reporter.PublishFailure(ctx)
 					out <- cliproxyexecutor.StreamChunk{Err: errScan}
 				} else {
+					updateAntigravitySimulatedCacheState(cacheKey, lastUsagePayload)
 					reporter.EnsurePublished(ctx)
 				}
-			}(httpResp)
+			}(httpResp, simulatedCacheKey)
 			return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 		}
 

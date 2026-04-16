@@ -66,6 +66,7 @@ type Params struct {
 	ThoughtsTokenCount   int64  // Cached thinking token count from usage metadata
 	TotalTokenCount      int64  // Cached total token count from usage metadata
 	CachedTokenCount     int64  // Cached content token count (indicates prompt caching)
+	CacheCreationTokens  int64  // Simulated cache creation token count for Claude-compatible usage output
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
@@ -97,7 +98,7 @@ var toolUseIDCounter uint64
 //
 // Returns:
 //   - [][]byte: A slice of bytes, each containing a Claude Code-compatible SSE payload.
-func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &Params{
 			HasFirstResponse: false,
@@ -109,6 +110,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	params := (*param).(*Params)
+	override := cache.SimulatedCacheOverrideFromContext(ctx)
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		output := make([]byte, 0, 256)
@@ -135,7 +137,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 
 		// Use cpaUsageMetadata within the message_start event for Claude.
 		if promptTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.promptTokenCount"); promptTokenCount.Exists() {
-			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.usage.input_tokens", promptTokenCount.Int())
+			inputTokens := promptTokenCount.Int()
+			if split, applied := cache.ApplySimulatedCacheOverride(override, promptTokenCount.Int()); applied {
+				inputTokens = split.DisplayInputTokens()
+			}
+			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.usage.input_tokens", inputTokens)
 		}
 		if candidatesTokenCount := gjson.GetBytes(rawJSON, "response.cpaUsageMetadata.candidatesTokenCount"); candidatesTokenCount.Exists() {
 			messageStartTemplate, _ = sjson.SetBytes(messageStartTemplate, "message.usage.output_tokens", candidatesTokenCount.Int())
@@ -321,6 +327,13 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				params.CandidatesTokenCount = 0
 			}
 		}
+		if split, applied := cache.ApplySimulatedCacheOverride(override, usageResult.Get("promptTokenCount").Int()); applied {
+			params.CachedTokenCount = split.CacheReadInputTokens
+			params.PromptTokenCount = split.DisplayInputTokens()
+			params.CacheCreationTokens = split.CacheCreationInputTokens
+		} else {
+			params.CacheCreationTokens = 0
+		}
 	}
 
 	if params.HasUsageMetadata && params.HasFinishReason {
@@ -367,6 +380,13 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
 		}
 	}
+	if params.CacheCreationTokens > 0 {
+		var err error
+		delta, err = sjson.SetBytes(delta, "usage.cache_creation_input_tokens", params.CacheCreationTokens)
+		if err != nil {
+			log.Warnf("antigravity claude response: failed to set cache_creation_input_tokens: %v", err)
+		}
+	}
 	*output = translatorcommon.AppendSSEEventString(*output, "message_delta", string(delta), 3)
 
 	params.HasSentFinalEvents = true
@@ -397,9 +417,10 @@ func resolveStopReason(params *Params) string {
 //
 // Returns:
 //   - []byte: A Claude-compatible JSON response.
-func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertAntigravityResponseToClaudeNonStream(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	toolNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
+	override := cache.SimulatedCacheOverrideFromContext(ctx)
 
 	root := gjson.ParseBytes(rawJSON)
 	promptTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
@@ -418,7 +439,11 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	responseJSON := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":null,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	responseJSON, _ = sjson.SetBytes(responseJSON, "id", root.Get("response.responseId").String())
 	responseJSON, _ = sjson.SetBytes(responseJSON, "model", root.Get("response.modelVersion").String())
-	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", promptTokens)
+	inputTokens := promptTokens - cachedTokens
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", inputTokens)
 	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.output_tokens", outputTokens)
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
 	if cachedTokens > 0 {
@@ -426,6 +451,19 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		responseJSON, err = sjson.SetBytes(responseJSON, "usage.cache_read_input_tokens", cachedTokens)
 		if err != nil {
 			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
+		}
+	}
+	if split, applied := cache.ApplySimulatedCacheOverride(override, promptTokens); applied {
+		responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", split.DisplayInputTokens())
+		if split.CacheReadInputTokens > 0 {
+			responseJSON, _ = sjson.SetBytes(responseJSON, "usage.cache_read_input_tokens", split.CacheReadInputTokens)
+		} else {
+			responseJSON, _ = sjson.DeleteBytes(responseJSON, "usage.cache_read_input_tokens")
+		}
+		if split.CacheCreationInputTokens > 0 {
+			responseJSON, _ = sjson.SetBytes(responseJSON, "usage.cache_creation_input_tokens", split.CacheCreationInputTokens)
+		} else {
+			responseJSON, _ = sjson.DeleteBytes(responseJSON, "usage.cache_creation_input_tokens")
 		}
 	}
 
